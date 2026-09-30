@@ -1,0 +1,98 @@
+name: hotel-offer-orchestrator
+
+x-app-env: &app-env
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: hotel-offers
+  REDIS_URL: redis://redis:6379
+  CACHE_TTL_SECONDS: "300"
+  # The mock supplier endpoints are served by the api container.
+  SUPPLIER_BASE_URL: http://api:3000
+  SUPPLIER_TIMEOUT_MS: "3000"
+  LOG_LEVEL: info
+
+services:
+  postgresql:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgresql
+    ports:
+      - "7233:7233"
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    image: hotel-offer-orchestrator:latest
+    environment:
+      <<: *app-env
+      SERVICE_NAME: api
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+  worker:
+    build: .
+    image: hotel-offer-orchestrator:latest
+    command: ["node", "dist/temporal/worker.js"]
+    # The worker has no HTTP server; disable the image's API healthcheck.
+    healthcheck:
+      disable: true
+    environment:
+      <<: *app-env
+      SERVICE_NAME: worker
+    depends_on:
+      api:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  temporal-db:
